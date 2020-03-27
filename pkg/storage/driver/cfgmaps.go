@@ -20,6 +20,7 @@ import (
 	"context"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pkg/errors"
@@ -41,7 +42,7 @@ const ConfigMapsDriverName = "ConfigMap"
 // ConfigMaps is a wrapper around an implementation of a kubernetes
 // ConfigMapsInterface.
 type ConfigMaps struct {
-	impl corev1.ConfigMapInterface
+	impl func() (corev1.ConfigMapInterface, error)
 	Log  func(string, ...interface{})
 }
 
@@ -49,8 +50,26 @@ type ConfigMaps struct {
 // the kubernetes ConfigMapsInterface.
 func NewConfigMaps(impl corev1.ConfigMapInterface) *ConfigMaps {
 	return &ConfigMaps{
-		impl: impl,
+		impl: func() (corev1.ConfigMapInterface, error) { return impl, nil },
 		Log:  func(_ string, _ ...interface{}) {},
+	}
+}
+
+// NewDeferredConfigMaps initializes a new ConfigMaps wrapping a getter of
+// the kubernetes ConfigMapInterface that will be called the first time
+// it is required.
+func NewDeferredConfigMaps(implFunc func() (corev1.ConfigMapInterface, error)) *ConfigMaps {
+	var (
+		impl    corev1.ConfigMapInterface
+		implErr error
+		once    sync.Once
+	)
+	return &ConfigMaps{
+		impl: func() (corev1.ConfigMapInterface, error) {
+			once.Do(func() { impl, implErr = implFunc() })
+			return impl, implErr
+		},
+		Log: func(_ string, _ ...interface{}) {},
 	}
 }
 
@@ -63,7 +82,11 @@ func (cfgmaps *ConfigMaps) Name() string {
 // or error if not found.
 func (cfgmaps *ConfigMaps) Get(key string) (*rspb.Release, error) {
 	// fetch the configmap holding the release named by key
-	obj, err := cfgmaps.impl.Get(context.Background(), key, metav1.GetOptions{})
+	impl, err := cfgmaps.impl()
+	if err != nil {
+		return nil, err
+	}
+	obj, err := impl.Get(context.Background(), key, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, ErrReleaseNotFound
@@ -89,7 +112,11 @@ func (cfgmaps *ConfigMaps) List(filter func(*rspb.Release) bool) ([]*rspb.Releas
 	lsel := kblabels.Set{"owner": "helm"}.AsSelector()
 	opts := metav1.ListOptions{LabelSelector: lsel.String()}
 
-	list, err := cfgmaps.impl.List(context.Background(), opts)
+	impl, err := cfgmaps.impl()
+	if err != nil {
+		return nil, err
+	}
+	list, err := impl.List(context.Background(), opts)
 	if err != nil {
 		cfgmaps.Log("list: failed to list: %s", err)
 		return nil, err
@@ -125,7 +152,11 @@ func (cfgmaps *ConfigMaps) Query(labels map[string]string) ([]*rspb.Release, err
 
 	opts := metav1.ListOptions{LabelSelector: ls.AsSelector().String()}
 
-	list, err := cfgmaps.impl.List(context.Background(), opts)
+	impl, err := cfgmaps.impl()
+	if err != nil {
+		return nil, err
+	}
+	list, err := impl.List(context.Background(), opts)
 	if err != nil {
 		cfgmaps.Log("query: failed to query with labels: %s", err)
 		return nil, err
@@ -163,7 +194,11 @@ func (cfgmaps *ConfigMaps) Create(key string, rls *rspb.Release) error {
 		return err
 	}
 	// push the configmap object out into the kubiverse
-	if _, err := cfgmaps.impl.Create(context.Background(), obj, metav1.CreateOptions{}); err != nil {
+	impl, err := cfgmaps.impl()
+	if err != nil {
+		return err
+	}
+	if _, err := impl.Create(context.Background(), obj, metav1.CreateOptions{}); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			return ErrReleaseExists
 		}
@@ -190,7 +225,11 @@ func (cfgmaps *ConfigMaps) Update(key string, rls *rspb.Release) error {
 		return err
 	}
 	// push the configmap object out into the kubiverse
-	_, err = cfgmaps.impl.Update(context.Background(), obj, metav1.UpdateOptions{})
+	impl, err := cfgmaps.impl()
+	if err != nil {
+		return err
+	}
+	_, err = impl.Update(context.Background(), obj, metav1.UpdateOptions{})
 	if err != nil {
 		cfgmaps.Log("update: failed to update: %s", err)
 		return err
@@ -205,7 +244,11 @@ func (cfgmaps *ConfigMaps) Delete(key string) (rls *rspb.Release, err error) {
 		return nil, err
 	}
 	// delete the release
-	if err = cfgmaps.impl.Delete(context.Background(), key, metav1.DeleteOptions{}); err != nil {
+	impl, err := cfgmaps.impl()
+	if err != nil {
+		return nil, err
+	}
+	if err = impl.Delete(context.Background(), key, metav1.DeleteOptions{}); err != nil {
 		return rls, err
 	}
 	return rls, nil

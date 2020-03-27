@@ -25,6 +25,7 @@ import (
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/kubernetes"
+	corev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
 
 	"helm.sh/helm/v3/internal/experimental/registry"
@@ -225,19 +226,26 @@ func (c *Configuration) Init(getter genericclioptions.RESTClientGetter, namespac
 	kc := kube.New(getter)
 	kc.Log = log
 
-	clientset, err := kc.Factory.KubernetesClientSet()
-	if err != nil {
-		return err
-	}
-
 	var store *storage.Storage
 	switch helmDriver {
 	case "secret", "secrets", "":
-		d := driver.NewSecrets(clientset.CoreV1().Secrets(namespace))
+		d := driver.NewDeferredSecrets(func() (corev1.SecretInterface, error) {
+			clientset, err := kc.Factory.KubernetesClientSet()
+			if err != nil {
+				return nil, err
+			}
+			return clientset.CoreV1().Secrets(namespace), nil
+		})
 		d.Log = log
 		store = storage.Init(d)
 	case "configmap", "configmaps":
-		d := driver.NewConfigMaps(clientset.CoreV1().ConfigMaps(namespace))
+		d := driver.NewDeferredConfigMaps(func() (corev1.ConfigMapInterface, error) {
+			clientset, err := kc.Factory.KubernetesClientSet()
+			if err != nil {
+				return nil, err
+			}
+			return clientset.CoreV1().ConfigMaps(namespace), nil
+		})
 		d.Log = log
 		store = storage.Init(d)
 	case "memory":

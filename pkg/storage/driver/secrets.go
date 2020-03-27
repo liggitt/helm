@@ -20,6 +20,7 @@ import (
 	"context"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pkg/errors"
@@ -41,7 +42,7 @@ const SecretsDriverName = "Secret"
 // Secrets is a wrapper around an implementation of a kubernetes
 // SecretsInterface.
 type Secrets struct {
-	impl corev1.SecretInterface
+	impl func() (corev1.SecretInterface, error)
 	Log  func(string, ...interface{})
 }
 
@@ -49,8 +50,26 @@ type Secrets struct {
 // the kubernetes SecretsInterface.
 func NewSecrets(impl corev1.SecretInterface) *Secrets {
 	return &Secrets{
-		impl: impl,
+		impl: func() (corev1.SecretInterface, error) { return impl, nil },
 		Log:  func(_ string, _ ...interface{}) {},
+	}
+}
+
+// NewDeferredSecrets initializes a new Secrets wrapping a getter of
+// the kubernetes SecretsInterface that will be called the first time
+// it is required.
+func NewDeferredSecrets(implFunc func() (corev1.SecretInterface, error)) *Secrets {
+	var (
+		impl    corev1.SecretInterface
+		implErr error
+		once    sync.Once
+	)
+	return &Secrets{
+		impl: func() (corev1.SecretInterface, error) {
+			once.Do(func() { impl, implErr = implFunc() })
+			return impl, implErr
+		},
+		Log: func(_ string, _ ...interface{}) {},
 	}
 }
 
@@ -63,7 +82,11 @@ func (secrets *Secrets) Name() string {
 // or error if not found.
 func (secrets *Secrets) Get(key string) (*rspb.Release, error) {
 	// fetch the secret holding the release named by key
-	obj, err := secrets.impl.Get(context.Background(), key, metav1.GetOptions{})
+	impl, err := secrets.impl()
+	if err != nil {
+		return nil, err
+	}
+	obj, err := impl.Get(context.Background(), key, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, ErrReleaseNotFound
@@ -82,7 +105,11 @@ func (secrets *Secrets) List(filter func(*rspb.Release) bool) ([]*rspb.Release, 
 	lsel := kblabels.Set{"owner": "helm"}.AsSelector()
 	opts := metav1.ListOptions{LabelSelector: lsel.String()}
 
-	list, err := secrets.impl.List(context.Background(), opts)
+	impl, err := secrets.impl()
+	if err != nil {
+		return nil, err
+	}
+	list, err := impl.List(context.Background(), opts)
 	if err != nil {
 		return nil, errors.Wrap(err, "list: failed to list")
 	}
@@ -117,7 +144,11 @@ func (secrets *Secrets) Query(labels map[string]string) ([]*rspb.Release, error)
 
 	opts := metav1.ListOptions{LabelSelector: ls.AsSelector().String()}
 
-	list, err := secrets.impl.List(context.Background(), opts)
+	impl, err := secrets.impl()
+	if err != nil {
+		return nil, err
+	}
+	list, err := impl.List(context.Background(), opts)
 	if err != nil {
 		return nil, errors.Wrap(err, "query: failed to query with labels")
 	}
@@ -153,7 +184,11 @@ func (secrets *Secrets) Create(key string, rls *rspb.Release) error {
 		return errors.Wrapf(err, "create: failed to encode release %q", rls.Name)
 	}
 	// push the secret object out into the kubiverse
-	if _, err := secrets.impl.Create(context.Background(), obj, metav1.CreateOptions{}); err != nil {
+	impl, err := secrets.impl()
+	if err != nil {
+		return err
+	}
+	if _, err := impl.Create(context.Background(), obj, metav1.CreateOptions{}); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			return ErrReleaseExists
 		}
@@ -178,7 +213,11 @@ func (secrets *Secrets) Update(key string, rls *rspb.Release) error {
 		return errors.Wrapf(err, "update: failed to encode release %q", rls.Name)
 	}
 	// push the secret object out into the kubiverse
-	_, err = secrets.impl.Update(context.Background(), obj, metav1.UpdateOptions{})
+	impl, err := secrets.impl()
+	if err != nil {
+		return err
+	}
+	_, err = impl.Update(context.Background(), obj, metav1.UpdateOptions{})
 	return errors.Wrap(err, "update: failed to update")
 }
 
@@ -189,7 +228,11 @@ func (secrets *Secrets) Delete(key string) (rls *rspb.Release, err error) {
 		return nil, err
 	}
 	// delete the release
-	err = secrets.impl.Delete(context.Background(), key, metav1.DeleteOptions{})
+	impl, err := secrets.impl()
+	if err != nil {
+		return nil, err
+	}
+	err = impl.Delete(context.Background(), key, metav1.DeleteOptions{})
 	return rls, err
 }
 
